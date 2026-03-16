@@ -219,11 +219,15 @@ class Workspace:
             job_repo = JsonJobRepository(
                 str(self.workspace_dir / "jobs.json"),
             )
+            # Heartbeat query path is per-agent (in workspace directory)
+            heartbeat_query_path = self.workspace_dir / "HEARTBEAT.md"
             self._cron_manager = CronManager(
                 repo=job_repo,
                 runner=self._runner,
                 channel_manager=self._channel_manager,
                 timezone="UTC",
+                heartbeat_config=agent_config.heartbeat,
+                heartbeat_query_path=heartbeat_query_path,
             )
             # Only start background tasks if heartbeat is enabled
             if agent_config.heartbeat and agent_config.heartbeat.enabled:

@@ -224,7 +224,9 @@ class AgentConfigWatcher:
         ):
             self._last_heartbeat_hash = new_hb_hash
             try:
-                await self._cron_manager.reschedule_heartbeat()
+                await self._cron_manager.reschedule_heartbeat(
+                    heartbeat_config=agent_config.heartbeat,
+                )
                 logger.info(
                     f"AgentConfigWatcher ({self._agent_id}): "
                     f"heartbeat rescheduled",

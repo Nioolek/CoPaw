@@ -296,7 +296,9 @@ async def put_heartbeat(
     async def reschedule_in_background():
         try:
             if agent.cron_manager is not None:
-                await agent.cron_manager.reschedule_heartbeat()
+                await agent.cron_manager.reschedule_heartbeat(
+                    heartbeat_config=hb,
+                )
         except Exception as e:
             import logging
 

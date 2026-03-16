@@ -10,14 +10,12 @@ import asyncio
 import logging
 import re
 from datetime import datetime, time, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
-from ...config import (
-    get_heartbeat_config,
-    get_heartbeat_query_path,
-    load_config,
-)
+from ...config import load_config
+from ...config.config import HeartbeatConfig
 from ...constant import HEARTBEAT_TARGET_LAST
 
 logger = logging.getLogger(__name__)
@@ -89,19 +87,32 @@ async def run_heartbeat_once(
     *,
     runner: Any,
     channel_manager: Any,
+    heartbeat_config: Optional[HeartbeatConfig] = None,
+    heartbeat_query_path: Optional[Path] = None,
 ) -> None:
     """
-    Run one heartbeat: read HEARTBEAT.md via config path, run agent,
+    Run one heartbeat: read HEARTBEAT.md, run agent,
     optionally dispatch to last channel (target=last).
+
+    Args:
+        runner: Agent runner instance
+        channel_manager: Channel manager for dispatching
+        heartbeat_config: Per-agent heartbeat config (from agent.json)
+        heartbeat_query_path: Path to HEARTBEAT.md file (per-agent workspace)
     """
-    config = load_config()
-    hb = get_heartbeat_config()
+    # Use provided config or skip if not configured
+    hb = heartbeat_config
+    if not hb:
+        logger.debug("heartbeat skipped: no config")
+        return
+
     if not _in_active_hours(hb.active_hours):
         logger.debug("heartbeat skipped: outside active hours")
         return
 
-    path = get_heartbeat_query_path()
-    if not path.is_file():
+    # Use provided path or skip if not configured
+    path = heartbeat_query_path
+    if not path or not path.is_file():
         logger.debug("heartbeat skipped: no file at %s", path)
         return
 
@@ -122,6 +133,8 @@ async def run_heartbeat_once(
         "user_id": "main",
     }
 
+    # Load global config for last_dispatch (shared across agents)
+    config = load_config()
     target = (hb.target or "").strip().lower()
     if target == HEARTBEAT_TARGET_LAST and config.last_dispatch:
         ld = config.last_dispatch

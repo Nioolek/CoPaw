@@ -361,9 +361,15 @@ def save_config(config: Config, config_path: Optional[Path] = None) -> None:
 
 
 def get_heartbeat_config() -> HeartbeatConfig:
-    """Return effective heartbeat config (from file or default 30m/main)."""
+    """Return heartbeat config from legacy field or default.
+
+    Note: In multi-agent architecture, heartbeat config is stored per-agent
+    in workspace/agent.json. This function only provides a fallback default.
+    Use agent_config.heartbeat for actual per-agent configuration.
+    """
     config = load_config()
-    hb = config.agents.defaults.heartbeat
+    defaults = config.agents.defaults
+    hb = defaults.heartbeat if defaults else None
     return hb if hb is not None else HeartbeatConfig()
 
 

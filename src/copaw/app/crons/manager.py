@@ -5,13 +5,14 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from ...config import get_heartbeat_config
+from ...config.config import HeartbeatConfig
 
 from ..console_push_store import append as push_store_append
 from .executor import CronExecutor
@@ -37,6 +38,8 @@ class CronManager:
         runner: Any,
         channel_manager: Any,
         timezone: str = "UTC",  # pylint: disable=redefined-outer-name
+        heartbeat_config: Optional[HeartbeatConfig] = None,
+        heartbeat_query_path: Optional[Path] = None,
     ):
         self._repo = repo
         self._runner = runner
@@ -46,6 +49,8 @@ class CronManager:
             runner=runner,
             channel_manager=channel_manager,
         )
+        self._heartbeat_config = heartbeat_config
+        self._heartbeat_query_path = heartbeat_query_path
 
         self._lock = asyncio.Lock()
         self._states: Dict[str, CronJobState] = {}
@@ -63,8 +68,8 @@ class CronManager:
                 await self._register_or_update(job)
 
             # Heartbeat: one interval job when enabled in config
-            hb = get_heartbeat_config()
-            if getattr(hb, "enabled", True):
+            hb = self._heartbeat_config
+            if hb and getattr(hb, "enabled", False):
                 interval_seconds = parse_heartbeat_every(hb.every)
                 self._scheduler.add_job(
                     self._heartbeat_callback,
@@ -117,15 +122,27 @@ class CronManager:
         async with self._lock:
             self._scheduler.resume_job(job_id)
 
-    async def reschedule_heartbeat(self) -> None:
-        """Reload heartbeat config and update or remove the heartbeat job."""
+    async def reschedule_heartbeat(
+        self,
+        heartbeat_config: Optional[HeartbeatConfig] = None,
+    ) -> None:
+        """Reload heartbeat config and update or remove the heartbeat job.
+
+        Args:
+            heartbeat_config: Optional new heartbeat config. If provided,
+                updates the internal config. If not provided, uses current config.
+        """
         async with self._lock:
             if not self._started:
                 return
-            hb = get_heartbeat_config()
+            # Update internal config if new one provided
+            if heartbeat_config is not None:
+                self._heartbeat_config = heartbeat_config
+
+            hb = self._heartbeat_config
             if self._scheduler.get_job(HEARTBEAT_JOB_ID):
                 self._scheduler.remove_job(HEARTBEAT_JOB_ID)
-            if getattr(hb, "enabled", True):
+            if hb and getattr(hb, "enabled", False):
                 interval_seconds = parse_heartbeat_every(hb.every)
                 self._scheduler.add_job(
                     self._heartbeat_callback,
@@ -261,6 +278,8 @@ class CronManager:
             await run_heartbeat_once(
                 runner=self._runner,
                 channel_manager=self._channel_manager,
+                heartbeat_config=self._heartbeat_config,
+                heartbeat_query_path=self._heartbeat_query_path,
             )
         except Exception:  # pylint: disable=broad-except
             logger.exception("heartbeat run failed")
