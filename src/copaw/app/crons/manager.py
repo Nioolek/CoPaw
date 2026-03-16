@@ -130,7 +130,8 @@ class CronManager:
 
         Args:
             heartbeat_config: Optional new heartbeat config. If provided,
-                updates the internal config. If not provided, uses current config.
+                updates the internal config. If not provided, uses current
+                config.
         """
         async with self._lock:
             if not self._started:
