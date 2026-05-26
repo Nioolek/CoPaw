@@ -22,6 +22,7 @@ import type { ProviderInfo, ModelInfo } from "../../api/types";
 import ModelSelector from "./ModelSelector";
 import { useTheme } from "../../contexts/ThemeContext";
 import { useAgentStore } from "../../stores/agentStore";
+import { useCodingMode } from "../../stores/codingModeStore";
 import { useChatAnywhereInput } from "@agentscope-ai/chat";
 import styles from "./index.module.less";
 import { IconButton } from "@agentscope-ai/design";
@@ -63,6 +64,7 @@ import {
   type CopyableResponse,
   type RuntimeLoadingBridgeApi,
 } from "./utils";
+import { openExternalLink } from "../../utils/openExternalLink";
 
 const CHAT_ATTACHMENT_MAX_MB = 10;
 
@@ -211,7 +213,7 @@ function useIMEComposition(isChatActive: () => boolean) {
 function useMultimodalCapabilities(
   refreshKey: number,
   locationPathname: string,
-  isChatActive: () => boolean,
+  _isChatActive: () => boolean,
   selectedAgent: string,
 ) {
   const [multimodalCaps, setMultimodalCaps] = useState<{
@@ -284,12 +286,20 @@ function useMultimodalCapabilities(
     fetchMultimodalCaps();
   }, [fetchMultimodalCaps, refreshKey]);
 
-  // Also poll caps when navigating back to chat
+  // Re-sync caps only when navigating FROM a non-chat page back to chat.
+  // Do NOT re-fetch when switching between sessions (e.g. /chat/A → /chat/B)
+  // because the agent/model config hasn't changed — avoids unnecessary
+  // models + active API calls on every session switch.
+  const prevChatPathRef = useRef(locationPathname);
   useEffect(() => {
-    if (isChatActive()) {
+    const prev = prevChatPathRef.current;
+    prevChatPathRef.current = locationPathname;
+    const wasOutsideChat = !prev.startsWith("/chat");
+    const isNowInChat = locationPathname.startsWith("/chat");
+    if (wasOutsideChat && isNowInChat) {
       fetchMultimodalCaps();
     }
-  }, [locationPathname, fetchMultimodalCaps, isChatActive]);
+  }, [locationPathname, fetchMultimodalCaps]);
 
   // Listen for model-switched event from ModelSelector
   useEffect(() => {
@@ -463,6 +473,97 @@ function useMessageHistoryNavigation(
   }, [isChatActive, isComposingRef, getUserMessagesWithText]);
 }
 
+// ---------------------------------------------------------------------------
+// Chat input draft persistence
+// ---------------------------------------------------------------------------
+
+const DRAFT_STORAGE_KEY = "qwenpaw_chat_input_draft";
+
+interface DraftState {
+  value: string;
+  selectionStart: number;
+  selectionEnd: number;
+}
+
+function useChatInputDraft(isChatActive: () => boolean) {
+  useEffect(() => {
+    if (!isChatActive()) return;
+
+    let saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const getTextarea = (): HTMLTextAreaElement | null => {
+      const sender = document.querySelector('[class*="sender"]');
+      return sender?.querySelector("textarea") as HTMLTextAreaElement | null;
+    };
+
+    const saveDraft = (textarea: HTMLTextAreaElement) => {
+      const draft: DraftState = {
+        value: textarea.value,
+        selectionStart: textarea.selectionStart,
+        selectionEnd: textarea.selectionEnd,
+      };
+      if (draft.value) {
+        localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(draft));
+      } else {
+        localStorage.removeItem(DRAFT_STORAGE_KEY);
+      }
+    };
+
+    const handleInput = (e: Event) => {
+      const target = e.target as HTMLElement;
+      if (target?.tagName !== "TEXTAREA") return;
+      if (!target?.closest('[class*="sender"]')) return;
+
+      if (saveTimer) clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => {
+        saveDraft(target as HTMLTextAreaElement);
+      }, 300);
+    };
+
+    // Restore draft on mount with polling for textarea readiness
+    let restoreAttempts = 0;
+    const maxRestoreAttempts = 20;
+    const restoreInterval = setInterval(() => {
+      restoreAttempts++;
+      const textarea = getTextarea();
+      if (textarea) {
+        clearInterval(restoreInterval);
+        const raw = localStorage.getItem(DRAFT_STORAGE_KEY);
+        if (raw) {
+          try {
+            const draft: DraftState = JSON.parse(raw);
+            if (draft.value) {
+              setTextareaValue(textarea, draft.value);
+              requestAnimationFrame(() => {
+                textarea.selectionStart = draft.selectionStart;
+                textarea.selectionEnd = draft.selectionEnd;
+              });
+            }
+          } catch {
+            // Ignore malformed data
+          }
+        }
+      } else if (restoreAttempts >= maxRestoreAttempts) {
+        clearInterval(restoreInterval);
+      }
+    }, 100);
+
+    document.addEventListener("input", handleInput, true);
+
+    return () => {
+      clearInterval(restoreInterval);
+      if (saveTimer) clearTimeout(saveTimer);
+      document.removeEventListener("input", handleInput, true);
+
+      // Final save on unmount
+      const textarea = getTextarea();
+      if (textarea) {
+        saveDraft(textarea);
+      }
+    };
+  }, [isChatActive]);
+}
+
 function RuntimeLoadingBridge({
   bridgeRef,
 }: {
@@ -502,6 +603,15 @@ export default function ChatPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const { isDark } = useTheme();
+  const { codingMode, initialized } = useCodingMode();
+
+  // Redirect to /coding when coding mode is active
+  useEffect(() => {
+    if (initialized && codingMode) {
+      navigate("/coding", { replace: true });
+    }
+  }, [initialized, codingMode, navigate]);
+
   const chatId = useMemo(() => {
     const match = location.pathname.match(/^\/chat\/(.+)$/);
     return match?.[1];
@@ -512,7 +622,7 @@ export default function ChatPage() {
   const [refreshKey, setRefreshKey] = useState(0);
   const runtimeLoadingBridgeRef = useRef<RuntimeLoadingBridgeApi | null>(null);
   const { message } = useAppMessage();
-  const { approvals } = useApprovalContext();
+  const { approvals, setApprovals } = useApprovalContext();
   const [approvalRequests, setApprovalRequests] = useState<
     Map<string, ApprovalMessageData>
   >(new Map());
@@ -609,6 +719,9 @@ export default function ChatPage() {
           requestId,
           rootSessionId,
         );
+        setApprovals((prev) =>
+          prev.filter((item) => item.request_id !== requestId),
+        );
         message.success(t("approval.approved"));
 
         // Delay removal to let exit animation complete
@@ -624,7 +737,7 @@ export default function ChatPage() {
         console.error("Failed to approve:", error);
       }
     },
-    [approvalRequests, chatId, t, message],
+    [approvalRequests, chatId, t, message, setApprovals],
   );
 
   const handleDeny = useCallback(
@@ -645,6 +758,9 @@ export default function ChatPage() {
         }
 
         await commandsApi.sendApprovalCommand("deny", requestId, rootSessionId);
+        setApprovals((prev) =>
+          prev.filter((item) => item.request_id !== requestId),
+        );
         message.success(t("approval.denied"));
 
         // Delay removal to let animation complete
@@ -661,7 +777,7 @@ export default function ChatPage() {
         console.error("Failed to deny:", error);
       }
     },
-    [approvalRequests, chatId, t, message],
+    [approvalRequests, chatId, t, message, setApprovals],
   );
 
   // Use custom hooks for better separation of concerns
@@ -682,6 +798,7 @@ export default function ChatPage() {
   const pendingClearHistoryRef = useRef(false);
   const whisperSpeechRef = useRef<WhisperSpeechButtonRef>(null);
   const [whisperEnabled, setWhisperEnabled] = useState(false);
+  const [whisperChecked, setWhisperChecked] = useState(false);
 
   // Check if Whisper transcription is configured
   useEffect(() => {
@@ -690,7 +807,8 @@ export default function ChatPage() {
       .then((res) => {
         setWhisperEnabled(res.transcription_provider_type !== "disabled");
       })
-      .catch(() => setWhisperEnabled(false));
+      .catch(() => setWhisperEnabled(false))
+      .finally(() => setWhisperChecked(true));
   }, []);
 
   const handleWhisperTranscription = useCallback((text: string) => {
@@ -707,6 +825,16 @@ export default function ChatPage() {
   }, []);
 
   useMessageHistoryNavigation(chatRef, isChatActive, isComposingRef);
+  useChatInputDraft(isChatActive);
+
+  const onFileCardClick = useCallback(
+    (fileInfo: { name?: string; size?: number; url?: string }) => {
+      if (fileInfo.url) {
+        openExternalLink(fileInfo.url);
+      }
+    },
+    [],
+  );
 
   // Shortcut key for voice recording (Ctrl+Shift+M or Cmd+Shift+M on Mac)
   useEffect(() => {
@@ -773,6 +901,12 @@ export default function ChatPage() {
       realId: string | null,
     ) => {
       if (!isChatActiveRef.current) return;
+
+      // Issue #4557: When a user-initiated session switch is in progress,
+      // handleSessionClick owns the navigate call. Do NOT navigate here
+      // to avoid race conditions and infinite loops.
+      if (sessionApi.isSessionSwitching) return;
+
       // Update URL when session is selected and different from current
       const targetId = realId || sessionId;
       if (!targetId) return;
@@ -802,6 +936,7 @@ export default function ChatPage() {
 
       if (targetId !== lastSessionIdRef.current) {
         lastSessionIdRef.current = targetId;
+        sessionApi.lastNavigatedChatId = targetId;
         navigateRef.current(`/chat/${targetId}`, { replace: true });
       }
     };
@@ -1049,7 +1184,7 @@ export default function ChatPage() {
       sender: {
         ...(i18nConfig as any)?.sender,
         beforeSubmit: handleBeforeSubmit,
-        allowSpeech: !whisperEnabled,
+        allowSpeech: whisperChecked && !whisperEnabled,
         prefix: whisperEnabled ? (
           <WhisperSpeechButton
             ref={whisperSpeechRef}
@@ -1057,6 +1192,7 @@ export default function ChatPage() {
           />
         ) : undefined,
         attachments: {
+          multiple: true,
           trigger: function (props: any) {
             const tooltipKey = multimodalCaps.supportsMultimodal
               ? multimodalCaps.supportsImage && !multimodalCaps.supportsVideo
@@ -1098,11 +1234,13 @@ export default function ChatPage() {
               scheduleHistoryClear();
             }
           }
+
           return payload as any;
         },
         replaceMediaURL: (url: string) => {
           return toDisplayUrl(url);
         },
+        onFileCardClick,
         cancel(data: { session_id: string }) {
           const resolvedChatId =
             sessionApi.getRealIdForSession(data.session_id) ?? data.session_id;
@@ -1159,6 +1297,10 @@ export default function ChatPage() {
     toolRenderConfig,
     scheduleHistoryClear,
     planEnabled,
+    onFileCardClick,
+    whisperChecked,
+    whisperEnabled,
+    handleWhisperTranscription,
   ]);
 
   return (
@@ -1194,6 +1336,7 @@ export default function ChatPage() {
         >
           <ApprovalCard
             requestId={request.requestId}
+            agentId={request.agentId}
             toolName={request.toolName}
             severity={request.severity}
             findingsCount={request.findingsCount}
@@ -1206,16 +1349,31 @@ export default function ChatPage() {
             onApprove={handleApprove}
             onDeny={handleDeny}
             onCancel={() => {
-              const sessionId = window.currentSessionId || "";
+              const sessionId =
+                request.rootSessionId || window.currentSessionId || "";
               const resolvedChatId =
                 sessionApi.getRealIdForSession(sessionId) ??
                 chatIdRef.current ??
                 sessionId;
 
               if (resolvedChatId) {
-                chatApi.stopChat(resolvedChatId).catch((err) => {
-                  console.error("Failed to stop chat:", err);
-                });
+                console.log("[Chat] Calling stopChat with:", resolvedChatId);
+                chatApi
+                  .stopChat(resolvedChatId)
+                  .then(() => {
+                    console.log("[Chat] stopChat succeeded");
+                    setApprovals((prev) =>
+                      prev.filter(
+                        (item) =>
+                          item.root_session_id !== request.rootSessionId,
+                      ),
+                    );
+                  })
+                  .catch((err) => {
+                    console.error("[Chat] stopChat failed:", err);
+                  });
+              } else {
+                console.warn("[Chat] No chat_id resolved, cannot cancel task");
               }
             }}
           />
