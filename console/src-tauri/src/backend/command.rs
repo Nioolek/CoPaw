@@ -55,11 +55,68 @@ pub(super) fn create(app: &tauri::AppHandle) -> Result<Command, String> {
         backend.display(),
         backend_dir.display(),
     );
-    Ok(app
+    let mut command = app
         .shell()
         .command(backend)
         .current_dir(&backend_dir)
-        .env(path_env_key(), path_with_backend_dir(&backend_dir)?))
+        .env(path_env_key(), path_with_backend_dir(&backend_dir)?);
+    // Bundled standalone Python used by the backend to install third-party
+    // plugin dependencies (sys.executable is the frozen backend, not Python).
+    if let Some(python) = packaged_python_runtime(app) {
+        log::info!("[backend] bundled python runtime: {}", python.display());
+        command = command.env(
+            "QWENPAW_DESKTOP_PY_RUNTIME",
+            python.to_string_lossy().to_string(),
+        );
+    } else {
+        log::warn!(
+            "[backend] bundled python runtime not found; plugin dependency \
+             installation will be unavailable"
+        );
+    }
+    if let Some(node_runtime) = packaged_node_runtime(app) {
+        log::info!("[backend] bundled node runtime: {}", node_runtime.display());
+        command = command.env(
+            "QWENPAW_DESKTOP_NODE_RUNTIME",
+            node_runtime.to_string_lossy().to_string(),
+        );
+    } else {
+        log::warn!("[backend] bundled node runtime not found");
+    }
+    Ok(command)
+}
+
+#[cfg(not(debug_assertions))]
+fn packaged_python_runtime(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let base = app
+        .path()
+        .resource_dir()
+        .ok()?
+        .join("binaries")
+        .join("python-runtime")
+        .join("python");
+    let candidates = if cfg!(windows) {
+        vec![base.join("python.exe")]
+    } else {
+        vec![base.join("bin").join("python3"), base.join("bin").join("python")]
+    };
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+#[cfg(not(debug_assertions))]
+fn packaged_node_runtime(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let root = app
+        .path()
+        .resource_dir()
+        .ok()?
+        .join("binaries")
+        .join("node-runtime");
+    let node = if cfg!(windows) {
+        root.join("node.exe")
+    } else {
+        root.join("bin").join("node")
+    };
+    node.is_file().then_some(root)
 }
 
 #[cfg(not(debug_assertions))]
