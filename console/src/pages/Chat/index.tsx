@@ -56,6 +56,7 @@ import {
 import { ChatScalar, ChatList } from "../../plugins/registry/slotKeys";
 import { HostRequestCard, HostResponseCard } from "./HostBubbles";
 import { withGenericFallback } from "../../components/Chat/ToolCards/adapters/v1Adapter";
+import { applyApprovalLevelToRequestBody } from "./approvalPayload";
 
 interface ApprovalMessageData {
   requestId: string;
@@ -1506,7 +1507,7 @@ export default function ChatPage() {
       const request = approvalRequests.get(requestId);
       if (!request) return;
 
-      const rootSessionId = window.currentSessionId || chatId || "";
+      const rootSessionId = request.rootSessionId || request.sessionId;
 
       try {
         const cardElement = document.querySelector(
@@ -1550,7 +1551,7 @@ export default function ChatPage() {
       if (!request) return;
 
       // Use currentSessionId (root session) instead of request.sessionId (sub-agent session)
-      const rootSessionId = window.currentSessionId || chatId || "";
+      const rootSessionId = request.rootSessionId || request.sessionId;
 
       try {
         // Add exit animation class
@@ -2283,14 +2284,11 @@ export default function ChatPage() {
         }
       }
 
-      // Session override only; otherwise backend uses running-config approval_level
-      const sessionLevel = sessionApprovalLevelRef.current;
-      if (sessionLevel) {
-        const rc =
-          (requestBody.request_context as Record<string, unknown>) || {};
-        rc.approval_level = sessionLevel;
-        requestBody.request_context = rc;
-      }
+      applyApprovalLevelToRequestBody(
+        requestBody,
+        sessionApprovalLevelRef.current,
+        runningConfigApprovalLevel,
+      );
 
       const backendChatId =
         sessionApi.getRealIdForSession(String(requestBody.session_id || "")) ??
@@ -2332,7 +2330,7 @@ export default function ChatPage() {
 
       return wrapChatResponseUsageStream(response, chatRef);
     },
-    [extLists, selectedAgent],
+    [extLists, selectedAgent, runningConfigApprovalLevel],
   );
 
   const handleFileUpload = useCallback(
